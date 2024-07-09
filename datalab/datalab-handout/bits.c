@@ -224,8 +224,13 @@ int conditional(int x, int y, int z) {
  *   Max ops: 24
  *   Rating: 3
  */
-int isLessOrEqual(int x, int y) {
-  return !((y + negate(x)) >> 31);
+int isLessOrEqual(int x, int y) {//判断x<=y?
+  int signx = (x >> 31) &0x1;       //取x的符号位
+   int signy = (y >> 31) &0x1;       //取y的符号位
+   int isSameSign=! (signx ^ signy) ;// 对符号位异或取反，判断是否相同
+   int p=! ( ( (~x)+1+y ) >> 31);    //计算y-x，并取结果的符号位
+
+   return ( isSameSign & p ) | ( ( !isSameSign ) & signx);
 }
 //4
 /* 
@@ -253,7 +258,8 @@ int logicalNeg(int x) {
  */
 int howManyBits(int x) {
   int sign = x >> 31;
-  int complement = conditional(isLessOrEqual(0, x),x, ~x );//x >= 0的时候，选择本身，否则为反码
+  //isLessOrEqual(0, x)的错误实现
+  int complement = conditional(!((x + negate(0)) >> 31),x, ~x );//x >= 0的时候，选择本身，否则为反码
   int bit16 = !!(complement >> 16) << 4;
   complement = complement >> bit16;
   int bit8 = !!(complement >> 8) << 3;
