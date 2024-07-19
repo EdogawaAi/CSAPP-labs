@@ -1,0 +1,55 @@
+    .pos 0
+    irmovq stack, %rsp  #Set up stack pointer
+    call main
+    halt
+
+    #Array of 4 elements
+    .align 8
+    #source block
+    src:
+      .quad 0x00a
+      .quad 0x0b0
+      .quad 0xc00
+    dest:
+      .quad 0x111
+      .quad 0x222
+      .quad 0x333
+
+    main:
+      irmovq src, %rdi
+      irmovq dest, %rsi
+      irmovq $3, %rdx
+      call copy
+      ret
+
+
+    copy:
+      pushq %r8
+      pushq %r9
+      pushq %rbx
+
+      xorq %rax, %rax#long result = 0
+      irmovq $8, %r8
+      irmovq $1, %r9
+      jmp test
+
+    loop:
+      mrmovq (%rdi), %rbx#val = %rbx
+      addq %r8, %rdi#src++
+      rmmovq %rbx, (%rsi)#*dest = val
+      addq %r8, %rsi#dest++
+      xorq %rbx, %rax
+      subq %r9, %rdx
+
+    test:
+      andq %rdx, %rdx
+      jne loop
+
+      popq %rbx
+      popq %r9
+      popq %r8
+      ret
+
+    #stack starts here and grows to lower address
+      .pos 0x200
+    stack:
