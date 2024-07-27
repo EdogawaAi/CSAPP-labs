@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <string.h>
+#include <string.h>q
 #include <ctype.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -163,8 +163,43 @@ int main(int argc, char **argv)
  * background children don't receive SIGINT (SIGTSTP) from the kernel
  * when we type ctrl-c (ctrl-z) at the keyboard.  
 */
+pid_t Fork(void){
+    pid_t pid;
+
+    if((pid = fork()) < 0)
+        unix_error("Fork error");
+    return pid;
+}
+
 void eval(char *cmdline) 
 {
+    char *argv[MAXARGS];//argb for execve()
+    int bg;
+    pid_t pid;
+
+    bg = parseline(cmdline, argv);
+    if(argv[0] == NULL)
+        return;
+    
+    if(!builtin_cmd(argv)){
+        if((pid = Fork()) == 0){
+            //子进程运行user job
+            if(execve(argv[0], argv, environ) < 0){
+                printf("%s: Command not found.\n", argv[0]);
+                exit(0);
+            }
+        }
+        
+        //parent进程等待终止
+        if(!bg){
+            int status;
+            if(waitpid(pid, &status, 0) < 0)
+                unix_error("waitfg: waitpid error");
+        }
+        else
+            printf("%d %s", pid, cmdline);
+        }
+
     return;
 }
 
@@ -231,6 +266,18 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    if(!strcmp(argv[0], "quit"))
+        exit(0);
+    if(!strcmp(argv[0], "&"))
+        return 1;
+    if(!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")){
+        do_bgfg(argv);
+        return 1;
+    }
+    if(!strcmp(argv[0], "jobs")){
+        listjobs(jobs);
+        return 1;
+    }
     return 0;     /* not a builtin command */
 }
 
@@ -239,6 +286,40 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    struct job_t* job = NULL;
+    int state;
+    int jid;
+    char* tmp;
+    pid_t pid;
+
+    if(!strcmp(argv[0], "bg")) state = BG;
+        else state = FG;
+    if(argv[1] == NULL){
+        printf("%s command requires PID or %%jobid argument\n", argv[0]);
+        return;
+    }
+    *tmp = argv[1];
+
+    if(tmp[0] == '%'){
+        jid = atoi(&tmp[1]);
+        job = getjobjid(jobs, jid);
+        if(job == NULL){
+            printf("%s: No such job\n", tmp);
+            return;
+        }else{
+            pid = job->pid;
+        }
+    }
+
+    kill(-pid, SIGCONT);
+    if(!strcmp(argv[0], "fg")){
+        job->state = FG;
+        waitfg(job->pid);
+    }else{
+        printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+        job->state = BG;
+    }
+
     return;
 }
 
@@ -247,6 +328,13 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    //while(fgpid(jobs) != 0) pause();
+    struct job_t* job = getjobpid(jobs, pid);
+    if(job == NULL)
+        return;
+    while(fgpid(job) != pid){
+
+    }
     return;
 }
 
@@ -263,6 +351,28 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    pid_t pid;
+    int status;
+    int olderrno = errno;
+//等待所有的进程
+    while((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0){//抄书的wait
+        if(WIFEXITED(status)){//exit normally
+            deletejob(jobs, pid);
+        }
+        else if(WIFSIGNALED(status)){//terminated by signal
+            int jid = pid2jid(pid);
+            printf("Job [%d] (%d) terminated by signal %d\n", jid, pid, WTERMSIG(status));
+            deletejob(jobs, pid);
+        }
+        else if(WIFSTOPPED(status)){//stopped by signal
+            struct job_t* job = getjobpid(jobs, pid);
+            job->state = ST;
+            
+            int jid = pid2jid(pid);
+            printf("Job [%d] (%d) stopped by signal %d\n", jid, pid, WSTOPSIG(status));
+        }
+    }
+    errno = olderrno;
     return;
 }
 
@@ -273,6 +383,12 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+    int olderror = errno;
+    pid_t pid = fgpid(jobs);
+    if(pid)
+        Kill(-pid, SIGINT);
+    
+    errno = olderror;
     return;
 }
 
@@ -283,8 +399,20 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    int olderror = errno;
+    pid_t pid = fgpid(jobs);
+    if(pid)
+        Kill(-pid, SIGSTOP);
+
+    errno = olderror;
     return;
 }
+
+/**
+ * @brief while(1)
+ * ctrl+c
+ * 
+ */
 
 /*********************
  * End signal handlers
