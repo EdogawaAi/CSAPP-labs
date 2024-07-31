@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <string.h>q
+#include <string.h>
 #include <ctype.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -173,32 +173,24 @@ pid_t Fork(void){
 
 void eval(char *cmdline) 
 {
-    char *argv[MAXARGS];//argb for execve()
-    int bg;
+    char *argv[MAXARGS];
+    int bg = parseline(cmdline, argv);//true if requested a BG job,false FG job
     pid_t pid;
 
-    bg = parseline(cmdline, argv);
-    if(argv[0] == NULL)
-        return;
-    
     if(!builtin_cmd(argv)){
-        if((pid = Fork()) == 0){
-            //子进程运行user job
-            if(execve(argv[0], argv, environ) < 0){
-                printf("%s: Command not found.\n", argv[0]);
+        //forking and execting a child process
+        if((pid = fork()) == 0){
+            if(execvp(argv[0], argv) < 0){
+                printf("Command not found!\n");
                 exit(0);
             }
         }
-        
-        //parent进程等待终止
+        addjob(jobs, pid, bg?BG:FG, cmdline);
         if(!bg){
-            int status;
-            if(waitpid(pid, &status, 0) < 0)
-                unix_error("waitfg: waitpid error");
+            waitfg(pid);
         }
-        else
-            printf("%d %s", pid, cmdline);
-        }
+
+    }
 
     return;
 }
@@ -328,13 +320,11 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    //while(fgpid(jobs) != 0) pause();
-    struct job_t* job = getjobpid(jobs, pid);
-    if(job == NULL)
-        return;
-    while(fgpid(job) != pid){
-
+    while (fgpid(jobs) == pid)
+    {
+        sleep(1);
     }
+    
     return;
 }
 
@@ -351,28 +341,8 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
-    pid_t pid;
-    int status;
-    int olderrno = errno;
-//等待所有的进程
-    while((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0){//抄书的wait
-        if(WIFEXITED(status)){//exit normally
-            deletejob(jobs, pid);
-        }
-        else if(WIFSIGNALED(status)){//terminated by signal
-            int jid = pid2jid(pid);
-            printf("Job [%d] (%d) terminated by signal %d\n", jid, pid, WTERMSIG(status));
-            deletejob(jobs, pid);
-        }
-        else if(WIFSTOPPED(status)){//stopped by signal
-            struct job_t* job = getjobpid(jobs, pid);
-            job->state = ST;
-            
-            int jid = pid2jid(pid);
-            printf("Job [%d] (%d) stopped by signal %d\n", jid, pid, WSTOPSIG(status));
-        }
-    }
-    errno = olderrno;
+    pid_t pid = wait(NULL);
+    deletejob(jobs, pid);
     return;
 }
 
