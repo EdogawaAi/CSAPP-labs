@@ -173,25 +173,55 @@ pid_t Fork(void){
 
 void eval(char *cmdline) 
 {
-    char *argv[MAXARGS];
-    int bg = parseline(cmdline, argv);//true if requested a BG job,false FG job
+    char* argv[MAXARGS];
+    int bg;
     pid_t pid;
 
+    ///trace05的完善，我们需要在addjob之后deletejob，
+    ///我们自然要阻塞SIGCHLD信号
+    sigset_t mask, prev_mask;
+    sigemptyset(&mask);
+
+    bg = parseline(cmdline, argv);
+    if(argv[0] == NULL)
+        return;//忽略空的输入
+    
     if(!builtin_cmd(argv)){
-        //forking and execting a child process
-        if((pid = fork()) == 0){
-            if(execvp(argv[0], argv) < 0){
-                printf("Command not found!\n");
+        ///将SIGCHLD加入sigset中
+        sigaddset(&mask, SIGCHLD);
+        ///阻塞SIGCHLD信号
+        sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+        if((pid = Fork()) == 0){
+            //trace06：
+            sigprocmask(SIG_BLOCK, &prev_mask, NULL);
+            setpgid(0, 0);//子进程的PGID = PID
+
+            //子进程运行user job
+            if(execve(argv[0], argv, environ) < 0){
+                printf("%s: Command not found\n", argv[0]);
                 exit(0);
             }
         }
-        addjob(jobs, pid, bg?BG:FG, cmdline);
-        if(!bg){
+
+            //Trace05:添加后台进程到列表中。但是此时我们会发生竞争：
+            //在执行addjob以前，收到了SIGCHLD信号。此时我们必须执行sigchld。
+            //我们在add一个结束的进程
+
+            //Trace06里，我们将前台的进程也加入joblist
+            addjob(jobs, pid, (bg? BG:FG), cmdline);
+            ///我们取消了之前阻塞SIGCHLD
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+        //parent 等待前台job来terminate
+        if(!bg){//如果是前台,我们等待子进程结束,
+            int status;
+            // if(waitpid(pid, &status, 0) < 0)
+            //     unix_error("waitfg: waitpid error");
             waitfg(pid);
+        } else{
+            printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
         }
-
     }
-
     return;
 }
 
@@ -262,15 +292,20 @@ int builtin_cmd(char **argv)
         exit(0);
     if(!strcmp(argv[0], "&"))
         return 1;
+    if(!strcmp(argv[0], "jobs")){
+        listjobs(jobs);
+        /*Trace05
+        tsh> jobs
+        [1] (1840) Running ./myspin 2 &
+        [2] (1842) Running ./myspin 3 &
+        */
+        return 1;
+    }
     if(!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")){
         do_bgfg(argv);
         return 1;
     }
-    if(!strcmp(argv[0], "jobs")){
-        listjobs(jobs);
-        return 1;
-    }
-    return 0;     /* not a builtin command */
+    return 0;
 }
 
 /* 
@@ -278,41 +313,47 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
-    struct job_t* job = NULL;
-    int state;
-    int jid;
-    char* tmp;
+    char* tmp = argv[1];
     pid_t pid;
+    struct job_t* job;
 
-    if(!strcmp(argv[0], "bg")) state = BG;
-        else state = FG;
-    if(argv[1] == NULL){
+    if(tmp == NULL){
         printf("%s command requires PID or %%jobid argument\n", argv[0]);
         return;
     }
-    *tmp = argv[1];
-
+    
     if(tmp[0] == '%'){
-        jid = atoi(&tmp[1]);
+        int jid = atoi(&tmp[1]);
         job = getjobjid(jobs, jid);
         if(job == NULL){
             printf("%s: No such job\n", tmp);
             return;
-        }else{
-            pid = job->pid;
         }
+        else
+            pid = job->pid;
+    }
+    else if(isdigit(tmp[0])){
+        pid = atoi(tmp);
+        job = getjobpid(jobs, pid);
+        if(job == NULL){
+            printf("(%d): No such process\n", pid);
+            return;
+        }
+    }else{
+        printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+        return;
     }
 
     kill(-pid, SIGCONT);
+
     if(!strcmp(argv[0], "fg")){
         job->state = FG;
-        waitfg(job->pid);
+        waitfg(pid);
     }else{
         printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
         job->state = BG;
     }
 
-    return;
 }
 
 /* 
@@ -320,12 +361,11 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    while (fgpid(jobs) == pid)
-    {
-        sleep(1);
+    struct job_t *job = getjobpid(jobs, pid);
+    if(job == NULL) return;
+    while(pid == fgpid(jobs)){
+        
     }
-    
-    return;
 }
 
 /*****************
@@ -341,8 +381,32 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
-    pid_t pid = wait(NULL);
-    deletejob(jobs, pid);
+    //trace05： 我们结束子进程，向父进程发送SIGCHLD信号。
+    //父进程退出的时候，就可以删除了
+    int wstatus;
+    int olderrno = errno;
+    pid_t pid;
+
+    //pid_t pid = waitpid(-1, &wstatus, WNOHANG);
+    ///我们需要尽可能多回收子进程，因为结束的子进程可能有很多。如果追踪异常，那么就得加上| WUNTRACED
+    while((pid = waitpid(-1, &wstatus, WNOHANG | WUNTRACED)) > 0){
+        if(WIFEXITED(wstatus))
+            deletejob(jobs, pid);
+        if(WIFSIGNALED(wstatus)){
+            printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, sig);
+            deletejob(jobs, pid);
+        }
+        if(WIFSTOPPED(wstatus)){
+            printf("Job [%d] (%d) stopped by signal %d\n", pid2jid(pid), pid, sig);
+            struct job_t *job = getjobpid(jobs, pid);
+            job->state = ST;
+        }
+    }
+    ///错误处理
+    if(pid != 0 && errno != ECHILD){
+        printf("waitpid error\n");
+    }
+    errno = olderrno;
     return;
 }
 
@@ -353,12 +417,10 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-    int olderror = errno;
     pid_t pid = fgpid(jobs);
-    if(pid)
-        Kill(-pid, SIGINT);
-    
-    errno = olderror;
+    printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, sig);
+    deletejob(jobs, pid);
+    kill(-pid, sig);
     return;
 }
 
@@ -369,12 +431,10 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
-    int olderror = errno;
     pid_t pid = fgpid(jobs);
-    if(pid)
-        Kill(-pid, SIGSTOP);
-
-    errno = olderror;
+    printf("Job [%d] (%d) stopped by signal %d\n", pid2jid(pid), pid, sig);
+    getjobpid(jobs, pid) -> state = ST;
+    kill(-pid, sig);
     return;
 }
 
