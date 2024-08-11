@@ -1,0 +1,11 @@
+Reading symbols from ./mdriver...
+Starting program: /home/hoshino-cola/CodeBlocks/csapplab/malloclab/malloclab-handout/mdriver ./mdriver -t ./traces/ -v
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+
+Program received signal SIGSEGV, Segmentation fault.
+0x56557949 in coalesce (bp=0xf6981020) at mm.c:196
+196	    size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
+
+quit
+warning: Nothing to save.
