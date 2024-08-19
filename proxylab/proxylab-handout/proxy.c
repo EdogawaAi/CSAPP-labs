@@ -1,9 +1,17 @@
 #include <stdio.h>
 #include "csapp.h"
+#include "sbuf.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
+
+#define NTHREADS 4
+#define SBUFSIZE 16
+//void echo_cnt(int connfd);
+void *thread(void *vargp);
+
+sbuf_t sbuf;
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
@@ -19,6 +27,8 @@ int main(int argc, char *argv[])
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
 
+    pthread_t tid;
+
     /*check command-line args*/
     if(argc != 2)
     {
@@ -28,17 +38,32 @@ int main(int argc, char *argv[])
 
     signal(SIGPIPE, SIG_IGN);
     listenfd = Open_listenfd(argv[1]);
+
+    //-------
+    sbuf_init(&sbuf, SBUFSIZE);
+    for(int i = 0; i < NTHREADS; i++)
+    {
+        Pthread_create(&tid, NULL, thread, NULL);
+    }
+
+
+    //-------
+
     while(1)
     {
         clientlen = sizeof(clientaddr);
         connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
 
+        //向信号量缓冲区写入这个文件描述符
+        sbuf_insert(&sbuf, connfd);
+
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
         printf("Accepted connection from (%s %s)\n", hostname, port);
 
-        doit(connfd);
-        Close(connfd);
+        //doit(connfd);
+        //Close(connfd);
     }
+    return 0;
 }
 
 void doit(int fd)
@@ -181,3 +206,13 @@ void build_header(char *server,  char *hostname, char *port, char *path, rio_t *
     return;
 }
 
+void *thread(void *vargp)
+{
+    Pthread_detach(pthread_self());
+    while (1)
+    {
+        int connfd = sbuf_remove(&sbuf);
+        doit(connfd);
+        Close(connfd);
+    }
+}
