@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "csapp.h"
 #include "sbuf.h"
+#include "cache.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -12,6 +13,7 @@
 void *thread(void *vargp);
 
 sbuf_t sbuf;
+Cache *cache;
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
@@ -38,6 +40,8 @@ int main(int argc, char *argv[])
 
     signal(SIGPIPE, SIG_IGN);
     listenfd = Open_listenfd(argv[1]);
+
+    cache = init_cache();
 
     //-------
     sbuf_init(&sbuf, SBUFSIZE);
@@ -76,7 +80,7 @@ void doit(int fd)
     rio_t rio, se_rio;
 
     char hostname[MAXLINE], port[MAXLINE], path[MAXLINE];
-    char server[MAXLINE];
+    char server[MAXLINE]; char complete_url[MAXLINE];
 
     //面对客户端,自己是服务器,接受请求
     Rio_readinitb(&rio, fd);
@@ -92,6 +96,16 @@ void doit(int fd)
     //解析url
     parse_url(url, hostname, port, path);
 
+    sprintf(complete_url, "%s%s", complete_url, hostname);
+    sprintf(complete_url, "%s%s", complete_url, port);
+    sprintf(complete_url, "%s%s", complete_url, path);
+    if(reader(cache, fd, complete_url))
+    {
+        fprintf(stdout, "%s from cache\n", url);
+        fflush(stdout);
+        return;
+    }
+
     //构造新的请求头部
     build_header(server, hostname, port, path, &rio);
 
@@ -106,10 +120,17 @@ void doit(int fd)
     Rio_readinitb(&se_rio, serverfd);
     Rio_writen(serverfd, server, strlen(server));
 
+    int total_size = 0; char object_buf[MAX_OBJECT_SIZE];
     while((n = Rio_readlineb(&se_rio, buf, MAXLINE)) != 0)
     {
         printf("get %d bytes from server\n", n);
         Rio_writen(fd, buf, n);
+        strcpy(object_buf + total_size, buf);
+        total_size += n;
+    }
+    if(total_size < MAX_OBJECT_SIZE)
+    {
+        writer(cache, complete_url, object_buf);
     }
     Close(serverfd);
 
